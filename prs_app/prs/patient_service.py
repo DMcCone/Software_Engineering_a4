@@ -1,8 +1,10 @@
 """Patient Management package."""
+from dataclasses import replace
 from typing import List, Optional
 
 from .auth import AuthService
-from .models import Patient, Permission, PatientNotFound, ValidationError, parse_date, FieldChange
+from .models import (FieldChange, Patient, PatientNotFound, Permission, ValidationError,
+                     parse_date)
 from .persistence import PatientRepository
 
 EDITABLE_FIELDS = ("name", "date_of_birth", "phone", "address")   # FR-04
@@ -10,52 +12,66 @@ EDITABLE_FIELDS = ("name", "date_of_birth", "phone", "address")   # FR-04
 
 class PatientService:
     def __init__(self, repo: PatientRepository, auth: AuthService):
-        self.repo, self.auth = repo, auth
+        self._repo = repo
+        self._auth = auth
 
-    @staticmethod
-    def _clean(field: str, value: Optional[str]) -> Optional[str]:
-        value = value.strip() if value else None
-        if field == "name" and not value:
-            raise ValidationError("Patient name is required")        # FR-01
-        if field == "date_of_birth" and value:
-            parse_date(value, "Date of birth")
-        return value or None
+    # ---- public operations (each authorizes first) --------------------
+    def create_patient(self, token: str, name: str, date_of_birth: Optional[str] = None,
+                       phone: Optional[str] = None, address: Optional[str] = None) -> Patient:
+        """FR-01 / FR-02: the database assigns the unique, immutable ID."""
+        self._auth.authorize(token, Permission.PATIENT_CREATE)
+        fields = self._clean_fields(name=name, date_of_birth=date_of_birth,
+                                    phone=phone, address=address)
+        return self._repo.add(**fields)
 
-    def create_patient(self, token, name, date_of_birth=None, phone=None, address=None) -> Patient:
-        self.auth.authorize(token, Permission.PATIENT_CREATE)
-        vals = {f: self._clean(f, v) for f, v in
-                zip(EDITABLE_FIELDS, (name, date_of_birth, phone, address))}
-        return self.repo.add(**{"name": vals["name"], "dob": vals["date_of_birth"],
-                                "phone": vals["phone"], "address": vals["address"]})  # FR-02
+    def get_patient(self, token: str, patient_id) -> Patient:
+        """FR-03: raises PatientNotFound ("No patient with ID: [ID]") if absent."""
+        self._auth.authorize(token, Permission.PATIENT_READ)
+        return self._find_or_raise(patient_id)
 
-    def get_patient(self, token, patient_id) -> Patient:
-        self.auth.authorize(token, Permission.PATIENT_READ)
-        p = self.repo.find_by_id(self._to_id(patient_id))
-        if p is None:
-            raise PatientNotFound(patient_id)                          # FR-03
-        return p
+    def update_patient(self, token: str, target_id, /, **changes) -> Patient:
+        """FR-04: update permitted fields only; old/new values are kept in history."""
+        user = self._auth.authorize(token, Permission.PATIENT_UPDATE)
+        not_editable = set(changes) - set(EDITABLE_FIELDS)
+        if not_editable:
+            raise ValidationError(f"Field(s) not editable: {', '.join(sorted(not_editable))}")
+        current = self._find_or_raise(target_id)
+        cleaned = self._clean_fields(**changes)
+        self._repo.update(current, cleaned, user.username)
+        return replace(current, **cleaned)          # no re-query needed
 
-    def update_patient(self, token, target_id, /, **changes) -> Patient:
-        user = self.auth.authorize(token, Permission.PATIENT_UPDATE)
-        bad = set(changes) - set(EDITABLE_FIELDS)
-        if bad:
-            raise ValidationError(f"Field(s) not editable: {', '.join(sorted(bad))}")
-        patient = self.get_patient(token, target_id)                   # existence check
-        cleaned = {f: self._clean(f, v) for f, v in changes.items()}
-        self.repo.update(patient.patient_id, cleaned, user.username)
-        return self.get_patient(token, target_id)
+    def list_patients(self, token: str, sort_by: str = "id") -> List[Patient]:
+        """FR-08: sort by 'id' or 'name'."""
+        self._auth.authorize(token, Permission.PATIENT_READ)
+        return self._repo.list_all(sort_by)
 
-    def list_patients(self, token, sort_by="id") -> List[Patient]:     # FR-08
-        self.auth.authorize(token, Permission.PATIENT_READ)
-        return self.repo.list_all(sort_by)
+    def change_history(self, token: str, patient_id) -> List[FieldChange]:
+        self._auth.authorize(token, Permission.PATIENT_READ)
+        return self._repo.change_history(self._find_or_raise(patient_id).patient_id)
 
-    def change_history(self, token, patient_id) -> List[FieldChange]:
-        self.get_patient(token, patient_id)
-        return self.repo.change_history(int(patient_id))
+    # ---- helpers ------------------------------------------------------
+    def _find_or_raise(self, patient_id) -> Patient:
+        patient = self._repo.find_by_id(self._to_id(patient_id))
+        if patient is None:
+            raise PatientNotFound(patient_id)
+        return patient
 
     @staticmethod
     def _to_id(patient_id) -> int:
         try:
             return int(str(patient_id).strip())
         except ValueError:
-            return -1   # never matches -> PatientNotFound
+            return -1      # never matches a real ID -> PatientNotFound
+
+    @staticmethod
+    def _clean_fields(**fields: Optional[str]) -> dict:
+        """Trim values, turn blanks into None, and validate name / date of birth."""
+        cleaned = {}
+        for field, value in fields.items():
+            value = value.strip() if value else None
+            if field == "name" and not value:
+                raise ValidationError("Patient name is required")        # FR-01
+            if field == "date_of_birth" and value:
+                parse_date(value, "Date of birth")
+            cleaned[field] = value or None
+        return cleaned
