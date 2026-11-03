@@ -1,0 +1,21 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# SQLite databases created when the app runs (each machine makes its own)
+*.db
+*.db-journal
+*.sqlite3
+
+# Local secrets (e.g. ANTHROPIC_API_KEY)
+.env
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
